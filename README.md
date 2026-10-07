@@ -15,6 +15,12 @@ cp -n .env.example .env
 uv run immich-mcp
 ```
 
+Run the last command from the project root. It starts the existing MCP server
+on stdio and waits for an MCP host to connect; it is not an interactive shell
+command. The console script is declared in `pyproject.toml` as
+`immich-mcp = "immich_mcp.server:main"`, and `main()` starts the shared server
+with the MCP SDK's default stdio transport.
+
 `IMMICH_URL` may be the server root or end in `/api`. Configuration is read only
 from `.env` in the process working directory. The `.env` file is gitignored;
 do not commit the API key. Give the key `server.about` for `get_server_info`,
@@ -24,8 +30,20 @@ Reading library statistics also needs `asset.statistics`, `user.read`,
 `library.read`, and `library.statistics`. Immich marks the library endpoints
 admin-only, so this Resource requires an admin account's API key.
 
-The server uses MCP stdio transport. Configure your host to run
-`uv run immich-mcp` with this project as its working directory.
+Configure a local MCP host to launch the process with the project root as its
+working directory. A generic command configuration is:
+
+```json
+{
+  "command": "uv",
+  "args": ["run", "immich-mcp"],
+  "cwd": "/absolute/path/to/immich-mcp"
+}
+```
+
+The exact host configuration wrapper varies. Keep `cwd` pointed at this
+project because configuration is read from its local `.env` file when a tool
+or Resource accesses Immich. No process environment variables are needed.
 
 ## Tools
 
