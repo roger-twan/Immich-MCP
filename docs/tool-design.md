@@ -101,3 +101,29 @@ fields produce `unexpected_response`. An empty valid `items` list returns
 `assets: []`. Thumbnail errors, invalid image bytes, oversized images, and
 redirects only affect that asset's thumbnail status; the metadata result
 remains available.
+
+## Resource: `immich://library/stats`
+
+This static, read-only Resource has no inputs. It describes assets owned by
+the authenticated Immich user, rather than instance-wide administrator
+statistics. The client calls
+[`GET /api/assets/statistics`, `GET /api/users/me`, `GET /api/libraries`, and
+`GET /api/libraries/{id}/statistics`](https://raw.githubusercontent.com/immich-app/immich/main/open-api/immich-openapi-specs.json).
+The asset response provides `total`, `images`, and `videos`. The user response
+provides `id` and uploaded-asset quota usage in bytes. The library list is
+filtered by `ownerId`; each owned external library's statistics contributes
+its `usage` bytes. Immich [excludes external libraries from quota
+usage](https://docs.immich.app/administration/server-stats/), so adding these
+values is necessary for a complete owned-library storage total. The library
+endpoints are admin-only and need `library.read` and `library.statistics`, in
+addition to `asset.statistics` and `user.read` for the first two endpoints.
+The client maps the result to `total_assets`, `image_count`, `video_count`,
+`total_storage_bytes`, and decimal GB string `total_storage_gb`. It does not
+expose the other API fields or fetch individual assets. Missing or invalid
+required values, including a null `quotaUsageInBytes`, produce a safe
+`unexpected_response` error. A library permission failure also fails the
+read rather than returning an incomplete total.
+
+The MCP layer publishes one `application/json` text resource. Hosts can list
+and read the stable URI as context; an input-free snapshot does not need a
+tool invocation schema.

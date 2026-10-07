@@ -1,7 +1,8 @@
 # Immich MCP
 
-A small read-only MCP server for Immich. It currently exposes `get_server_info`,
-`get_recent_assets`, and `search_assets`.
+A small read-only MCP server for Immich. It exposes `get_server_info`,
+`get_recent_assets`, and `search_assets` as tools, plus
+`immich://library/stats` as a Resource.
 
 ## Setup
 
@@ -19,6 +20,9 @@ from `.env` in the process working directory. The `.env` file is gitignored;
 do not commit the API key. Give the key `server.about` for `get_server_info`,
 `asset.read` for media metadata, and `asset.view` for thumbnails. Metadata can
 still be returned when an individual thumbnail fails or `asset.view` is missing.
+Reading library statistics also needs `asset.statistics`, `user.read`,
+`library.read`, and `library.statistics`. Immich marks the library endpoints
+admin-only, so this Resource requires an admin account's API key.
 
 The server uses MCP stdio transport. Configure your host to run
 `uv run immich-mcp` with this project as its working directory.
@@ -103,6 +107,36 @@ Tool failures provide a concise JSON error with `code`, `message`, and
 included when relevant. Upstream response bodies and API keys are never placed
 in these errors. An empty search is a successful result with `assets: []`.
 
+## Resource: `immich://library/stats`
+
+Read this Resource for a current snapshot of assets **owned by the authenticated
+user**. It returns one `application/json` text value:
+
+```json
+{
+  "total_assets": 12,
+  "image_count": 8,
+  "video_count": 4,
+  "total_storage_bytes": 2500000000,
+  "total_storage_gb": "2.50 GB"
+}
+```
+
+Counts come from `GET /api/assets/statistics`. Storage bytes are the user's
+`quotaUsageInBytes` from `GET /api/users/me` plus `usage` from each of that
+user's external libraries, found through `GET /api/libraries` and
+`GET /api/libraries/{id}/statistics`. Immich [excludes external libraries from
+the storage quota](https://docs.immich.app/administration/server-stats/), so
+quota usage alone can be zero. GB uses decimal units: 1 GB = 1,000,000,000
+bytes. The Resource does not list assets or expose user profile or library
+path details. Missing storage usage or inaccessible library statistics cause
+an error rather than an incomplete total. Reads use the same bounded retries
+and safe errors as the tools.
+
+A Resource fits this fixed, input-free library snapshot: an MCP host can list
+and read it as context when needed, without asking an agent to choose tool
+arguments.
+
 ## Verify with MCP Inspector
 
 ```sh
@@ -126,3 +160,9 @@ When a filter-only result has a non-null `next_page_token`, continue with only
 `{"page_token": "<returned token>"}`.
 
 Run the automated tests with `uv run pytest`.
+
+To inspect the statistics Resource, connect in MCP Inspector, open
+**Resources**, find `immich://library/stats`, and choose **Read Resource**.
+The response should be JSON with the five fields above. If the read returns
+HTTP 403, use an admin account's API key with `asset.statistics`, `user.read`,
+`library.read`, and `library.statistics` permissions.

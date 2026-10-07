@@ -5,7 +5,7 @@ import json
 from typing import Annotated, Literal
 
 from mcp.server.mcpserver import MCPServer
-from mcp.server.mcpserver.exceptions import ToolError
+from mcp.server.mcpserver.exceptions import ResourceError, ToolError
 from mcp_types import CallToolResult, ImageContent, TextContent
 from pydantic import Field
 
@@ -14,6 +14,24 @@ from immich_mcp.config import Config
 
 
 mcp = MCPServer("Immich")
+
+
+@mcp.resource(
+    "immich://library/stats", name="library-stats", title="Immich library statistics",
+    description="Counts and storage usage for the authenticated user's Immich library.",
+    mime_type="application/json",
+)
+async def library_stats() -> str:
+    """Return a compact JSON snapshot of the authenticated user's library."""
+    try:
+        async with ImmichClient(Config.from_dotenv()) as client:
+            stats = await client.get_library_stats()
+    except (ValueError, ImmichError) as exc:
+        details = exc.to_dict() if isinstance(exc, ImmichError) else {
+            "code": "configuration_error", "message": str(exc), "retryable": False,
+        }
+        raise ResourceError(json.dumps(details, ensure_ascii=False)) from None
+    return json.dumps(vars(stats), ensure_ascii=False)
 
 
 def _tool_error(exc: ValueError | ImmichError) -> ToolError:

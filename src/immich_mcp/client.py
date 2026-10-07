@@ -44,6 +44,15 @@ class ServerInfo:
 
 
 @dataclass(frozen=True)
+class LibraryStats:
+    total_assets: int
+    image_count: int
+    video_count: int
+    total_storage_bytes: int
+    total_storage_gb: str
+
+
+@dataclass(frozen=True)
 class Location:
     city: str | None
     state: str | None
@@ -268,6 +277,61 @@ class ImmichClient:
             raise ImmichError("Immich returned unexpected server information", code="unexpected_response")
         build = data.get("build")
         return ServerInfo(version=data["version"], build=build if isinstance(build, str) else None)
+
+    async def get_library_stats(self) -> LibraryStats:
+        """Read owned-asset counts and uploaded plus external-library usage."""
+        try:
+            stats_response = await self._request("GET", "assets/statistics", operation="asset statistics")
+            stats = stats_response.json()
+            user_response = await self._request("GET", "users/me", operation="current user")
+            user = user_response.json()
+            libraries_response = await self._request("GET", "libraries", operation="external libraries")
+            libraries = libraries_response.json()
+        except ValueError:
+            raise ImmichError("Immich library statistics returned invalid JSON", code="invalid_json") from None
+
+        if not isinstance(stats, dict) or not isinstance(user, dict) or not isinstance(libraries, list):
+            raise ImmichError("Immich returned unexpected library statistics", code="unexpected_response")
+        counts = (stats.get("total"), stats.get("images"), stats.get("videos"))
+        uploaded_bytes = user.get("quotaUsageInBytes")
+        user_id = user.get("id")
+        if (any(type(value) is not int or value < 0 for value in counts) or
+            type(uploaded_bytes) is not int or uploaded_bytes < 0 or
+            not isinstance(user_id, str) or not user_id or
+            counts[0] < counts[1] + counts[2]):
+            raise ImmichError("Immich returned unexpected library statistics", code="unexpected_response")
+
+        storage_bytes = uploaded_bytes
+        for library in libraries:
+            if not isinstance(library, dict) or not isinstance(library.get("ownerId"), str):
+                raise ImmichError("Immich returned unexpected external libraries", code="unexpected_response")
+            if library["ownerId"] != user_id:
+                continue
+            library_id = library.get("id")
+            if not isinstance(library_id, str):
+                raise ImmichError("Immich returned unexpected external libraries", code="unexpected_response")
+            try:
+                UUID(library_id)
+            except ValueError:
+                raise ImmichError("Immich returned unexpected external libraries", code="unexpected_response") from None
+            response = await self._request(
+                "GET", f"libraries/{library_id}/statistics", operation="external library statistics",
+            )
+            try:
+                library_stats = response.json()
+            except ValueError:
+                raise ImmichError("Immich library statistics returned invalid JSON", code="invalid_json") from None
+            usage = library_stats.get("usage") if isinstance(library_stats, dict) else None
+            if type(usage) is not int or usage < 0:
+                raise ImmichError("Immich returned unexpected external library statistics",
+                                  code="unexpected_response")
+            storage_bytes += usage
+
+        return LibraryStats(
+            total_assets=counts[0], image_count=counts[1], video_count=counts[2],
+            total_storage_bytes=storage_bytes,
+            total_storage_gb=f"{storage_bytes / 1_000_000_000:.2f} GB",
+        )
 
     async def get_recent_assets(
         self, *, limit: int = 5, include_thumbnail: bool = True,

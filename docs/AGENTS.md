@@ -33,6 +33,10 @@ Keep MCP protocol logic separate from immich API integration.
 
 Do not add additional tools without explaining why they are needed.
 
+## Initial Resources
+
+- `immich://library/stats` - Library statistics
+
 ## Development
 
 Before implementing a significant change.
