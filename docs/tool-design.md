@@ -127,3 +127,14 @@ read rather than returning an incomplete total.
 The MCP layer publishes one `application/json` text resource. Hosts can list
 and read the stable URI as context; an input-free snapshot does not need a
 tool invocation schema.
+
+## Prompt: `review_memories`
+
+The sole Prompt argument is optional `days` (integer 1–365, default 30).
+`prompts/list` exposes this argument; `prompts/get` returns one user message
+with the selected review period. The text directs the model to use available
+Immich tools and useful thumbnails, identify supported events, activities,
+places, recurring people or subjects, and memorable moments, then write a
+concise chronological review. It separates observations from uncertain
+inferences and forbids unsupported details. It leaves tool selection to the
+model and performs no Immich HTTP calls during Prompt rendering.

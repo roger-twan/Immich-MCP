@@ -37,6 +37,10 @@ Do not add additional tools without explaining why they are needed.
 
 - `immich://library/stats` - Library statistics
 
+## Initial Prompts
+
+- `review_memories` - Review recent personal memories from Immich assets
+
 ## Development
 
 Before implementing a significant change.

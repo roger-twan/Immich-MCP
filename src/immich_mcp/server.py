@@ -16,6 +16,23 @@ from immich_mcp.config import Config
 mcp = MCPServer("Immich")
 
 
+@mcp.prompt(name="review_memories", description="Create a grounded personal memory review from recent Immich assets.")
+def review_memories(
+    days: Annotated[int, Field(ge=1, le=365, description="Number of recent days to review (1–365; default 30)")] = 30,
+) -> str:
+    """Guide a model to review recent personal memories using Immich."""
+    return (
+        f"Create a concise personal memory review of my Immich library for the past {days} days, ending today. "
+        "Use the available Immich tools to find relevant images and videos from that period. "
+        "Inspect available thumbnails when they help interpret an asset; a video thumbnail is only a still preview. "
+        "Identify important events, activities, places, recurring people or subjects, and memorable moments "
+        "supported by the assets. Organize the review chronologically, from oldest to newest, with short dated "
+        "sections where dates are available. Distinguish direct observations and metadata from uncertain inferences. "
+        "Do not invent names, relationships, events, locations, or details that the available assets do not support. "
+        "If evidence is sparse or a thumbnail is unavailable, say so briefly."
+    )
+
+
 @mcp.resource(
     "immich://library/stats", name="library-stats", title="Immich library statistics",
     description="Counts and storage usage for the authenticated user's Immich library.",

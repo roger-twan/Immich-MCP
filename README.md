@@ -1,8 +1,8 @@
 # Immich MCP
 
 A small read-only MCP server for Immich. It exposes `get_server_info`,
-`get_recent_assets`, and `search_assets` as tools, plus
-`immich://library/stats` as a Resource.
+`get_recent_assets`, and `search_assets` as tools,
+`immich://library/stats` as a Resource, and `review_memories` as a Prompt.
 
 ## Setup
 
@@ -137,6 +137,20 @@ A Resource fits this fixed, input-free library snapshot: an MCP host can list
 and read it as context when needed, without asking an agent to choose tool
 arguments.
 
+## Prompt: `review_memories`
+
+This MCP Prompt helps a model write a chronological personal memory review
+from the Immich assets it can access. Its only argument is `days`, the number
+of recent days to review (1–365, default 30). The generated prompt asks the
+model to use available Immich tools, inspect useful image or video thumbnails,
+identify supported events, activities, places, recurring people or subjects,
+and memorable moments. It asks the model to separate observations from
+uncertain inferences and avoid invented details. Prompt generation itself
+does not call Immich or fetch assets.
+
+MCP `prompts/list` advertises `review_memories` with optional `days`;
+`prompts/get` renders one user message for the chosen value.
+
 ## Verify with MCP Inspector
 
 ```sh
@@ -166,3 +180,9 @@ To inspect the statistics Resource, connect in MCP Inspector, open
 The response should be JSON with the five fields above. If the read returns
 HTTP 403, use an admin account's API key with `asset.statistics`, `user.read`,
 `library.read`, and `library.statistics` permissions.
+
+To test the Prompt in Inspector, open **Prompts**, select `review_memories`,
+and request it with no arguments or with `days` set to `30`. The returned user
+message should ask for a grounded review of the past 30 days. Getting the
+Prompt only renders instructions; the host/model must then use the existing
+tools to retrieve assets.
