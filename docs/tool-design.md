@@ -43,7 +43,38 @@ Hosts that support image content can render it; others can still read the
 metadata and status. Search, authentication, network, and unexpected-response
 errors become tool errors without revealing the API key.
 
-## Future tool: `search_assets`
+## `search_assets`
 
-Search the user's media library by keyword or other agent-friendly criteria.
-This tool has not been implemented.
+Use cases: find scenes by natural-language description, search a capture-time
+period, or narrow to images or videos in a city or country. At least one
+criterion is required to distinguish this from `get_recent_assets`. Inputs are
+`query`, `media_type`, `start_at`, `end_before`, `city`, `country`, `limit`,
+`include_thumbnail`, and `page_token`. Limits are 1–10, default 5; thumbnails
+default on. Location filters match the stored city/country metadata. People
+names are not an input: Immich's current filter takes person IDs, while name
+lookup is a separate API operation.
+
+When `query` is supplied, the client calls
+[`POST /api/search/smart`](https://raw.githubusercontent.com/immich-app/immich/main/open-api/immich-openapi-specs.json)
+(`searchSmart`, `asset.read`). The `query` is a natural-language semantic
+search, ranked by relevance. The request includes the same `SearchFilter` for
+media type, capture time, location, timeline visibility, and non-trashed assets.
+It requests EXIF details for location in returned assets. Immich smart search
+needs its machine-learning search configured and indexed. The documented
+`SmartSearchDto` has no cursor input, so semantic search returns at most one
+bounded page and `next_page_token: null`.
+
+Without `query`, the client calls `POST /api/search/metadata` with the same
+filters and descending `fileCreatedAt` order. It converts `assets.nextCursor`
+into an opaque `page_token` that preserves the filters, limit, and thumbnail
+choice. The next call passes only that token. Metadata search requires at
+least one of media type, date, city, or country. Cursor pagination requires
+Immich 3.2.0 or later.
+
+Both modes reuse the existing asset mapping, thumbnail fetch, and MCP image
+content construction. Empty results return `assets: []`; failed thumbnail
+requests keep the asset metadata. HTTP and response-shape errors become tool
+errors without exposing the API key. Neither mode downloads originals.
+The smart-search HTTP request has a 60-second timeout because a model may need
+time to load or run; metadata search uses the client's 10-second timeout.
+Timeouts and other request failures have distinct user-facing errors.

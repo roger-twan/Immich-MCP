@@ -91,6 +91,34 @@ def _read_token(token: str) -> tuple[str, str | None, str | None, int, bool]:
         raise ValueError("Invalid page_token") from None
 
 
+def _make_search_token(cursor: str, options: dict[str, object]) -> str:
+    payload = {"v": 1, "kind": "search", "cursor": cursor, "options": options}
+    return base64.urlsafe_b64encode(json.dumps(payload, separators=(",", ":")).encode()).decode().rstrip("=")
+
+
+def _read_search_token(token: str) -> tuple[str, dict[str, object]]:
+    try:
+        if not token or len(token) > 4096:
+            raise ValueError
+        payload = json.loads(base64.urlsafe_b64decode(token + "=" * (-len(token) % 4)))
+        if not isinstance(payload, dict) or payload.get("v") != 1 or payload.get("kind") != "search":
+            raise ValueError
+        cursor, options = payload["cursor"], payload["options"]
+        if not isinstance(cursor, str) or not cursor or not isinstance(options, dict):
+            raise ValueError
+        if set(options) != {"media_type", "start_at", "end_before", "city", "country", "limit", "include_thumbnail"}:
+            raise ValueError
+        if (options["media_type"] not in ("all", "image", "video") or
+            any(options[key] is not None and not isinstance(options[key], str)
+                for key in ("start_at", "end_before", "city", "country")) or
+            type(options["limit"]) is not int or not 1 <= options["limit"] <= 10 or
+            type(options["include_thumbnail"]) is not bool):
+            raise ValueError
+        return cursor, options
+    except (ValueError, KeyError, TypeError, UnicodeDecodeError, base64.binascii.Error):
+        raise ValueError("Invalid page_token") from None
+
+
 def _location(exif: object) -> Location | None:
     if not isinstance(exif, dict):
         return None
@@ -180,21 +208,101 @@ class ImmichClient:
         }
         if cursor:
             body["cursor"] = cursor
+        recent_assets, next_cursor = await self._search_page("search/metadata", body, limit, include_thumbnail)
+        next_page_token = _make_token(next_cursor, start_at, end_before, limit, include_thumbnail) if next_cursor else None
+        return RecentAssetsPage(assets=recent_assets, next_page_token=next_page_token)
+
+    async def search_assets(
+        self, *, query: str | None = None, media_type: Literal["all", "image", "video"] = "all",
+        start_at: str | None = None, end_before: str | None = None,
+        city: str | None = None, country: str | None = None,
+        limit: int = 5, include_thumbnail: bool = True, page_token: str | None = None,
+    ) -> RecentAssetsPage:
+        if page_token is not None:
+            if any(value is not None for value in (query, start_at, end_before, city, country)) or media_type != "all" or limit != 5 or include_thumbnail is not True:
+                raise ValueError("Use page_token alone to continue a search")
+            cursor, options = _read_search_token(page_token)
+            media_type = options["media_type"]
+            start_at, end_before = options["start_at"], options["end_before"]
+            city, country = options["city"], options["country"]
+            limit, include_thumbnail = options["limit"], options["include_thumbnail"]
+        else:
+            cursor = None
+        if type(limit) is not int or not 1 <= limit <= 10:
+            raise ValueError("limit must be between 1 and 10")
+        if media_type not in ("all", "image", "video"):
+            raise ValueError("media_type must be all, image, or video")
+        if type(include_thumbnail) is not bool:
+            raise ValueError("include_thumbnail must be a boolean")
+        for name, value, maximum in (("query", query, 300), ("city", city, 100), ("country", country, 100)):
+            if value is not None and (not isinstance(value, str) or not value.strip() or len(value) > maximum):
+                raise ValueError(f"{name} must be non-empty and at most {maximum} characters")
+        query = query.strip() if query is not None else None
+        city = city.strip() if city is not None else None
+        country = country.strip() if country is not None else None
+        start_at, end_before = _timestamp(start_at), _timestamp(end_before)
+        if start_at and end_before and start_at >= end_before:
+            raise ValueError("start_at must be before end_before")
+        if not any((query, start_at, end_before, city, country)) and media_type == "all":
+            raise ValueError("Provide a query or at least one search filter")
+
+        filters: dict[str, object] = {
+            "type": {"in": ["IMAGE", "VIDEO"]} if media_type == "all" else {"eq": media_type.upper()},
+            "visibility": {"eq": "timeline"},
+            "trashedAt": {"eq": None},
+        }
+        if start_at or end_before:
+            filters["takenAt"] = {key: value for key, value in (("gte", start_at), ("lt", end_before)) if value}
+        if city:
+            filters["city"] = {"eq": city}
+        if country:
+            filters["country"] = {"eq": country}
+        body: dict[str, object] = {"filter": filters, "size": limit, "withExif": True}
+        if query:
+            body["query"] = query
+            endpoint = "search/smart"
+        else:
+            endpoint = "search/metadata"
+            body["orderBy"] = {"field": "fileCreatedAt", "direction": "desc"}
+            if cursor:
+                body["cursor"] = cursor
+        found_assets, next_cursor = await self._search_page(endpoint, body, limit, include_thumbnail,
+                                                             require_cursor=not query)
+        next_page_token = None
+        if not query and next_cursor:
+            options = {"media_type": media_type, "start_at": start_at, "end_before": end_before,
+                       "city": city, "country": country, "limit": limit,
+                       "include_thumbnail": include_thumbnail}
+            next_page_token = _make_search_token(next_cursor, options)
+        return RecentAssetsPage(assets=found_assets, next_page_token=next_page_token)
+
+    async def _search_page(
+        self, endpoint: str, body: dict[str, object], limit: int,
+        include_thumbnail: bool, *, require_cursor: bool = True,
+    ) -> tuple[list[Asset], str | None]:
+        is_smart_search = endpoint == "search/smart"
         try:
-            response = await self._http.post("search/metadata", json=body)
+            if is_smart_search:
+                response = await self._http.post(endpoint, json=body, timeout=httpx.Timeout(60.0))
+            else:
+                response = await self._http.post(endpoint, json=body)
             response.raise_for_status()
             data = response.json()
         except httpx.HTTPStatusError as exc:
             raise ImmichError(f"Immich search returned HTTP {exc.response.status_code}") from None
-        except httpx.RequestError:
-            raise ImmichError("Could not search Immich") from None
+        except httpx.TimeoutException:
+            if is_smart_search:
+                raise ImmichError("Immich smart search timed out after 60 seconds") from None
+            raise ImmichError("Immich metadata search timed out after 10 seconds") from None
+        except httpx.RequestError as exc:
+            raise ImmichError(f"Immich search request failed ({type(exc).__name__})") from None
         except ValueError:
             raise ImmichError("Immich search returned invalid JSON") from None
         assets = data.get("assets") if isinstance(data, dict) else None
         items = assets.get("items") if isinstance(assets, dict) else None
-        if not isinstance(items, list) or "nextCursor" not in assets:
+        if not isinstance(items, list) or (require_cursor and "nextCursor" not in assets):
             raise ImmichError("Immich returned unexpected search results or does not support cursor pagination")
-        next_cursor = assets["nextCursor"]
+        next_cursor = assets.get("nextCursor")
         if next_cursor is not None and not isinstance(next_cursor, str):
             raise ImmichError("Immich returned an invalid search cursor")
         recent_assets: list[Asset] = []
@@ -226,8 +334,7 @@ class ImmichClient:
                                    thumbnail_mime_type=mime)
 
             recent_assets = list(await asyncio.gather(*(fetch(asset) for asset in recent_assets)))
-        next_page_token = _make_token(next_cursor, start_at, end_before, limit, include_thumbnail) if next_cursor else None
-        return RecentAssetsPage(assets=recent_assets, next_page_token=next_page_token)
+        return recent_assets, next_cursor
 
     async def _get_thumbnail(self, asset_id: str) -> tuple[str, bytes | None, str | None]:
         try:

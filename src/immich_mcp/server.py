@@ -2,14 +2,14 @@
 
 import base64
 import json
-from typing import Annotated
+from typing import Annotated, Literal
 
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp_types import CallToolResult, ImageContent, TextContent
 from pydantic import Field
 
-from immich_mcp.client import ImmichClient, ImmichError
+from immich_mcp.client import ImmichClient, ImmichError, RecentAssetsPage
 from immich_mcp.config import Config
 
 
@@ -41,6 +41,35 @@ async def get_recent_assets(
             )
     except (ValueError, ImmichError) as exc:
         raise ToolError(str(exc)) from None
+    return _asset_result(page)
+
+
+@mcp.tool()
+async def search_assets(
+    query: str | None = None,
+    media_type: Literal["all", "image", "video"] = "all",
+    start_at: str | None = None,
+    end_before: str | None = None,
+    city: str | None = None,
+    country: str | None = None,
+    limit: Annotated[int, Field(ge=1, le=10)] = 5,
+    include_thumbnail: bool = True,
+    page_token: str | None = None,
+) -> CallToolResult:
+    """Search images and videos. A query uses semantic relevance; filters alone sort newest first. Continue with page_token alone."""
+    try:
+        async with ImmichClient(Config.from_dotenv()) as client:
+            page = await client.search_assets(
+                query=query, media_type=media_type, start_at=start_at, end_before=end_before,
+                city=city, country=country, limit=limit, include_thumbnail=include_thumbnail,
+                page_token=page_token,
+            )
+    except (ValueError, ImmichError) as exc:
+        raise ToolError(str(exc)) from None
+    return _asset_result(page)
+
+
+def _asset_result(page: RecentAssetsPage) -> CallToolResult:
 
     assets: list[dict[str, object]] = []
     images: list[ImageContent] = []

@@ -1,7 +1,7 @@
 # Immich MCP
 
-A small read-only MCP server for Immich. It currently exposes `get_server_info`
-and `get_recent_assets`.
+A small read-only MCP server for Immich. It currently exposes `get_server_info`,
+`get_recent_assets`, and `search_assets`.
 
 ## Setup
 
@@ -61,6 +61,31 @@ come from `GET /api/assets/{id}/thumbnail?size=thumbnail`. See
 pagination uses fields introduced in Immich 3.2.0; an older server returns a
 clear unsupported-response error.
 
+### `search_assets`
+
+Search images and videos using a natural-language query or metadata filters.
+Provide at least one search criterion. Inputs:
+
+- `query`: optional natural-language description for semantic search, such as
+  `a dog running on a beach`.
+- `media_type`: `all` (default), `image`, or `video`.
+- `start_at`, `end_before`: optional inclusive/exclusive capture-time bounds as
+  RFC 3339 timestamps with timezone offsets.
+- `city`, `country`: optional exact location metadata filters.
+- `limit`: 1–10, default 5.
+- `include_thumbnail`: boolean, default `true`.
+- `page_token`: continuation token for filter-only searches. Pass it alone.
+
+With `query`, Immich's semantic search returns relevance-ranked results. It
+requires Immich smart search to be configured and indexed. The current smart
+search request has no cursor input, so this tool returns one bounded set and no
+continuation token. Without `query`, metadata search sorts newest first and
+supports cursor pagination. Both modes return the same `assets` representation
+as `get_recent_assets`, including optional thumbnail image blocks.
+Smart search allows up to 60 seconds for the Immich machine-learning response;
+metadata search retains a 10-second timeout. A timeout now produces a specific
+tool error, so it can be distinguished from an HTTP error or connection failure.
+
 ## Verify with MCP Inspector
 
 ```sh
@@ -74,5 +99,13 @@ metadata and image content blocks if thumbnails are available. Try
 If `next_page_token` is non-null, call again with only
 `{"page_token": "<returned token>"}`. If your host does not render MCP image
 blocks, check `thumbnail_status` and `thumbnail_content_index` in the result.
+
+Try `search_assets` with `{"query": "a dog running"}` for semantic search,
+`{"query": "sunset", "media_type": "video", "limit": 3}` to narrow by media
+type, or `{"city": "Shanghai", "include_thumbnail": false}` for a paginated
+metadata search. A date search can use
+`{"start_at": "2026-01-01T00:00:00Z", "end_before": "2027-01-01T00:00:00Z"}`.
+When a filter-only result has a non-null `next_page_token`, continue with only
+`{"page_token": "<returned token>"}`.
 
 Run the automated tests with `uv run pytest`.

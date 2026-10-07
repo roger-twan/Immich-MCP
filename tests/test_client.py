@@ -148,3 +148,126 @@ def test_recent_assets_rejects_invalid_input(kwargs: dict) -> None:
 
     with pytest.raises(ValueError):
         asyncio.run(run())
+
+
+def test_search_assets_semantic_query_with_filters_and_thumbnail() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        assert request.headers["x-api-key"] == "secret"
+        if request.url.path.endswith("/search/smart"):
+            assert request.extensions["timeout"]["read"] == 60.0
+            assert json.loads(request.content) == {
+                "query": "a dog running", "size": 2, "withExif": True,
+                "filter": {"type": {"eq": "VIDEO"}, "visibility": {"eq": "timeline"},
+                           "trashedAt": {"eq": None},
+                           "takenAt": {"gte": "2026-01-01T00:00:00.000Z"},
+                           "city": {"eq": "Shanghai"}},
+            }
+            return httpx.Response(200, json={"assets": {"items": [
+                {"id": "11111111-1111-4111-8111-111111111111", "type": "VIDEO",
+                 "originalFileName": "dog.mp4", "duration": 2500,
+                 "fileCreatedAt": "2026-09-01T10:00:00Z", "exifInfo": {"city": "Shanghai"}},
+            ]}})
+        assert request.url.path.endswith("/assets/11111111-1111-4111-8111-111111111111/thumbnail")
+        assert request.url.params["size"] == "thumbnail"
+        return httpx.Response(200, content=b"\xff\xd8\xffpreview")
+
+    async def run():
+        async with ImmichClient(Config("http://localhost:2283/api", "secret"), transport=httpx.MockTransport(handler)) as client:
+            return await client.search_assets(query=" a dog running ", media_type="video", city=" Shanghai ",
+                                              start_at="2026-01-01T08:00:00+08:00", limit=2)
+
+    page = asyncio.run(run())
+    assert len(requests) == 2
+    assert page.assets[0].asset_type == "video"
+    assert page.assets[0].duration_ms == 2500
+    assert page.assets[0].thumbnail_status == "included"
+    assert page.next_page_token is None
+
+
+def test_search_assets_metadata_filters_and_cursor() -> None:
+    bodies: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path.endswith("/search/metadata")
+        body = json.loads(request.content)
+        bodies.append(body)
+        return httpx.Response(200, json={"assets": {"items": [],
+            "nextCursor": "cursor-2" if len(bodies) == 1 else None}})
+
+    async def run():
+        async with ImmichClient(Config("http://localhost:2283/api", "secret"), transport=httpx.MockTransport(handler)) as client:
+            first = await client.search_assets(media_type="image", country="China", limit=3,
+                                               include_thumbnail=False)
+            second = await client.search_assets(page_token=first.next_page_token)
+            return first, second
+
+    first, second = asyncio.run(run())
+    assert first.assets == second.assets == []
+    assert bodies[0]["filter"]["type"] == {"eq": "IMAGE"}
+    assert bodies[0]["filter"]["country"] == {"eq": "China"}
+    assert bodies[0]["orderBy"] == {"field": "fileCreatedAt", "direction": "desc"}
+    assert bodies[1]["cursor"] == "cursor-2"
+    assert bodies[1]["size"] == 3
+    assert second.next_page_token is None
+
+
+@pytest.mark.parametrize("kwargs", [
+    {}, {"query": " "}, {"media_type": "audio"}, {"limit": 11},
+    {"city": " "}, {"page_token": "bad-token"},
+    {"query": "dog", "page_token": "bad-token"},
+])
+def test_search_assets_rejects_invalid_input(kwargs: dict) -> None:
+    async def run() -> None:
+        async with ImmichClient(Config("http://localhost:2283/api", "secret")) as client:
+            await client.search_assets(**kwargs)
+
+    with pytest.raises(ValueError):
+        asyncio.run(run())
+
+
+def test_search_assets_reports_api_failure_without_key() -> None:
+    async def run() -> None:
+        async with ImmichClient(Config("http://localhost:2283/api", "secret"),
+                                transport=httpx.MockTransport(lambda _: httpx.Response(403))) as client:
+            await client.search_assets(query="dog")
+
+    with pytest.raises(ImmichError, match="HTTP 403") as exc:
+        asyncio.run(run())
+    assert "secret" not in str(exc.value)
+
+
+@pytest.mark.parametrize(("query", "expected"), [
+    ("dog", "smart search timed out after 60 seconds"),
+    (None, "metadata search timed out after 10 seconds"),
+])
+def test_search_assets_reports_timeout_clearly(query: str | None, expected: str) -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("request timed out")
+
+    async def run() -> None:
+        async with ImmichClient(Config("http://localhost:2283/api", "secret"),
+                                transport=httpx.MockTransport(handler)) as client:
+            if query:
+                await client.search_assets(query=query)
+            else:
+                await client.search_assets(media_type="image")
+
+    with pytest.raises(ImmichError, match=expected):
+        asyncio.run(run())
+
+
+def test_search_assets_reports_request_error_category_without_details() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        raise httpx.RemoteProtocolError("private upstream details")
+
+    async def run() -> None:
+        async with ImmichClient(Config("http://localhost:2283/api", "secret"),
+                                transport=httpx.MockTransport(handler)) as client:
+            await client.search_assets(query="dog")
+
+    with pytest.raises(ImmichError, match="RemoteProtocolError") as exc:
+        asyncio.run(run())
+    assert "private upstream details" not in str(exc.value)
