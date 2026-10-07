@@ -1,20 +1,49 @@
-search_photos
+# Tool design
 
-Purpose:
-Search the user's photo library.
+## `get_recent_assets`
 
-Why a Tool:
-Requires dynamic query parameters and performs a search operation.
+Use cases: inspect the latest images and videos, scan a capture-time window, and continue
+through a short list without flooding the agent context. The tool is read-only.
 
-Inputs:
-- query
-- start_date
-- end_date
-- location
-- limit
+Inputs: `limit` (1–10, default 5), `include_thumbnail` (default `true`),
+optional inclusive `start_at`, optional exclusive `end_before`, and optional
+`page_token`. Date inputs must be RFC 3339 timestamps with timezone offsets.
+Continuation uses `page_token` alone. The opaque token preserves the search
+filters and limit and carries Immich's cursor.
 
-Output:
-Minimal asset metadata required by the agent.
+The client calls [Immich metadata search](https://api.immich.app/) via
+`POST /api/search/metadata` (`searchAssets`, `asset.read`). It filters to
+`IMAGE` or `VIDEO`, timeline visibility, and non-trashed assets; filters `takenAt` when
+requested; sorts by `fileCreatedAt` descending; and requests at most 10 assets.
+It requests EXIF metadata so locations are available when stored in Immich.
+The response's `assets.nextCursor` becomes `next_page_token`. The cursor and
+filter/order fields are documented in Immich's
+[OpenAPI specification](https://raw.githubusercontent.com/immich-app/immich/main/open-api/immich-openapi-specs.json).
+The cursor form requires Immich 3.2.0 or later.
 
-Not exposed:
-Internal Immich implementation details.
+For each result, the client maps `id`, `originalFileName`, `type`,
+`fileCreatedAt`, and optional EXIF city/state/country/coordinates into a small
+media record. The Immich type is mapped to `image` or `video`; other types are
+omitted. Video `duration` maps to `duration_ms` and is `null` if unavailable;
+images omit that field. Missing optional metadata becomes `null`. Paths, owner details, hashes,
+dimensions, camera information, and the raw API response are omitted.
+
+When requested, the client calls
+`GET /api/assets/{id}/thumbnail?size=thumbnail` (`viewAsset`, `asset.view`).
+It rejects redirects and images above 1 MB, accepts JPEG/PNG/WebP by their
+bytes, and never calls the original-download endpoint. A missing or failed
+thumbnail leaves the media metadata intact with a `thumbnail_status`. Video
+assets use a still thumbnail; this tool does not return playable video.
+Permission failures are marked `permission_denied` and produce a warning.
+
+The MCP tool returns a JSON text block plus native MCP `ImageContent` blocks.
+It base64-encodes each accepted thumbnail and supplies the detected MIME type.
+`thumbnail_content_index` points to the image block in the `content` array.
+Hosts that support image content can render it; others can still read the
+metadata and status. Search, authentication, network, and unexpected-response
+errors become tool errors without revealing the API key.
+
+## Future tool: `search_assets`
+
+Search the user's media library by keyword or other agent-friendly criteria.
+This tool has not been implemented.

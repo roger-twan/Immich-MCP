@@ -1,21 +1,22 @@
 import asyncio
+import base64
 from pathlib import Path
 
 import pytest
 from mcp.cli.cli import _import_server
 
-from immich_mcp.client import ImmichClient, ServerInfo
+from immich_mcp.client import Asset, ImmichClient, Location, RecentAssetsPage, ServerInfo
 from immich_mcp.server import mcp
 
 
-def test_only_get_server_info_is_registered() -> None:
-    assert [tool.name for tool in mcp._tool_manager.list_tools()] == ["get_server_info"]
+def test_only_two_tools_are_registered() -> None:
+    assert [tool.name for tool in mcp._tool_manager.list_tools()] == ["get_server_info", "get_recent_assets"]
 
 
 def test_mcp_dev_can_import_server_file() -> None:
     server_file = Path(__file__).resolve().parents[1] / "src" / "immich_mcp" / "server.py"
     imported = _import_server(server_file)
-    assert [tool.name for tool in imported._tool_manager.list_tools()] == ["get_server_info"]
+    assert [tool.name for tool in imported._tool_manager.list_tools()] == ["get_server_info", "get_recent_assets"]
 
 
 def test_get_server_info_returns_small_result(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
@@ -28,3 +29,47 @@ def test_get_server_info_returns_small_result(monkeypatch: pytest.MonkeyPatch, t
     monkeypatch.setattr(ImmichClient, "get_server_info", fake_get_server_info)
     result = asyncio.run(mcp.call_tool("get_server_info", {}))
     assert result.structured_content == {"version": "v3.2.0", "build": "release"}
+
+
+def test_recent_assets_tool_returns_metadata_and_native_image(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text("IMMICH_URL=http://localhost:2283\nIMMICH_API_KEY=secret\n")
+
+    async def fake_recent(_self: ImmichClient, **kwargs) -> RecentAssetsPage:
+        assert kwargs["limit"] == 5
+        assert kwargs["include_thumbnail"] is True
+        return RecentAssetsPage([
+            Asset("asset-1", "a.jpg", "image", "2026-10-07T02:00:00Z",
+                  Location("Shanghai", None, "China", 31.2, 121.4), "included",
+                  b"\xff\xd8\xffimage", "image/jpeg"),
+            Asset("asset-2", None, "video", None, None, "unavailable", duration_ms=123456),
+        ], "next-token")
+
+    monkeypatch.setattr(ImmichClient, "get_recent_assets", fake_recent)
+    result = asyncio.run(mcp.call_tool("get_recent_assets", {}))
+    assert result.structured_content["next_page_token"] == "next-token"
+    assert result.structured_content["assets"][0]["thumbnail_content_index"] == 1
+    assert result.structured_content["assets"][1]["thumbnail_content_index"] is None
+    assert [asset["type"] for asset in result.structured_content["assets"]] == ["image", "video"]
+    assert "duration_ms" not in result.structured_content["assets"][0]
+    assert result.structured_content["assets"][1]["duration_ms"] == 123456
+    assert len(result.content) == 2
+    assert result.content[1].type == "image"
+    assert base64.b64decode(result.content[1].data) == b"\xff\xd8\xffimage"
+
+
+def test_recent_assets_tool_reports_thumbnail_permission_without_failing(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text("IMMICH_URL=http://localhost:2283\nIMMICH_API_KEY=secret\n")
+
+    async def fake_recent(_self: ImmichClient, **_kwargs) -> RecentAssetsPage:
+        return RecentAssetsPage([
+            Asset("asset-1", "clip.mp4", "video", "2026-10-07T02:00:00Z", None, "permission_denied"),
+        ], None)
+
+    monkeypatch.setattr(ImmichClient, "get_recent_assets", fake_recent)
+    result = asyncio.run(mcp.call_tool("get_recent_assets", {}))
+    assert result.structured_content["assets"][0]["thumbnail_status"] == "permission_denied"
+    assert result.structured_content["assets"][0]["duration_ms"] is None
+    assert result.structured_content["warnings"] == ["Thumbnails need the asset.view API key permission."]
+    assert len(result.content) == 1

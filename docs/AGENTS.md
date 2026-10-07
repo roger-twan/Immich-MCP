@@ -28,9 +28,8 @@ Keep MCP protocol logic separate from immich API integration.
 
 ## Initial Tools
 
-1. `get_recent_photos` - Get recent photos with optional date range and limit.
-2. `search_photos` - Search photos by keyword.
-3. `get_photo` - Get a specific photo by ID.
+1. `get_recent_assets` - Get recent images and videos with optional date range and limit.
+2. `search_assets` - Search assets by keyword.
 
 Do not add additional tools without explaining why they are needed.
 
