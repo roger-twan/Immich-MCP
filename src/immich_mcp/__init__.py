@@ -1,0 +1,1 @@
+"""Immich MCP integration."""

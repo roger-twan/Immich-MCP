@@ -1,0 +1,23 @@
+[project]
+name = "immich-mcp"
+version = "0.1.0"
+description = "A small read-only MCP server for Immich"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "httpx[socks]>=0.28,<1",
+    "mcp[cli]>=2.3.0",
+    "python-dotenv>=1.0,<2",
+]
+
+[project.scripts]
+immich-mcp = "immich_mcp.server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
