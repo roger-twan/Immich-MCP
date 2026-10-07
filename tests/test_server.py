@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import json
 from pathlib import Path
 
 import pytest
@@ -114,9 +115,46 @@ def test_search_assets_tool_reports_safe_api_error(monkeypatch: pytest.MonkeyPat
     (tmp_path / ".env").write_text("IMMICH_URL=http://localhost:2283\nIMMICH_API_KEY=secret\n")
 
     async def fake_search(_self: ImmichClient, **_kwargs) -> RecentAssetsPage:
-        raise ImmichError("Immich search returned HTTP 403")
+        raise ImmichError("Immich search returned HTTP 403", code="permission_denied", status=403)
 
     monkeypatch.setattr(ImmichClient, "search_assets", fake_search)
     with pytest.raises(ToolError, match="HTTP 403") as exc:
         asyncio.run(mcp.call_tool("search_assets", {"query": "dog"}))
     assert "secret" not in str(exc.value)
+    details = json.loads(str(exc.value).split(": ", 1)[1])
+    assert details == {"code": "permission_denied", "message": "Immich search returned HTTP 403",
+                       "retryable": False, "status": 403}
+
+
+def test_get_server_info_tool_reports_structured_failure(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text("IMMICH_URL=http://localhost:2283\nIMMICH_API_KEY=secret\n")
+
+    async def fake_info(_self: ImmichClient) -> ServerInfo:
+        raise ImmichError("Immich server info returned HTTP 429", code="rate_limited",
+                          status=429, retryable=True, retry_after_seconds=30)
+
+    monkeypatch.setattr(ImmichClient, "get_server_info", fake_info)
+    with pytest.raises(ToolError) as caught:
+        asyncio.run(mcp.call_tool("get_server_info", {}))
+    details = json.loads(str(caught.value).split(": ", 1)[1])
+    assert details["code"] == "rate_limited"
+    assert details["retry_after_seconds"] == 30
+
+
+def test_search_assets_tool_warns_on_partial_thumbnail_rate_limit(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text("IMMICH_URL=http://localhost:2283\nIMMICH_API_KEY=secret\n")
+
+    async def fake_search(_self: ImmichClient, **_kwargs) -> RecentAssetsPage:
+        return RecentAssetsPage([
+            Asset("asset-1", "a.jpg", "image", None, None, "rate_limited"),
+            Asset("asset-2", "b.jpg", "image", None, None, "included",
+                  b"\xff\xd8\xffimage", "image/jpeg"),
+        ], None)
+
+    monkeypatch.setattr(ImmichClient, "search_assets", fake_search)
+    result = asyncio.run(mcp.call_tool("search_assets", {"query": "dog"}))
+    assert len(result.structured_content["assets"]) == 2
+    assert result.structured_content["warnings"] == ["Some thumbnails were rate limited by Immich."]
+    assert len(result.content) == 2

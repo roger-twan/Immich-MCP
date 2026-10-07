@@ -23,8 +23,9 @@ The cursor form requires Immich 3.2.0 or later.
 
 For each result, the client maps `id`, `originalFileName`, `type`,
 `fileCreatedAt`, and optional EXIF city/state/country/coordinates into a small
-media record. The Immich type is mapped to `image` or `video`; other types are
-omitted. Video `duration` maps to `duration_ms` and is `null` if unavailable;
+media record. The Immich type is mapped to `image` or `video`; a missing or
+unsupported type is reported as an unexpected upstream response. Video
+`duration` maps to `duration_ms` and is `null` if unavailable;
 images omit that field. Missing optional metadata becomes `null`. Paths, owner details, hashes,
 dimensions, camera information, and the raw API response are omitted.
 
@@ -35,6 +36,7 @@ bytes, and never calls the original-download endpoint. A missing or failed
 thumbnail leaves the media metadata intact with a `thumbnail_status`. Video
 assets use a still thumbnail; this tool does not return playable video.
 Permission failures are marked `permission_denied` and produce a warning.
+HTTP 429 on a thumbnail is marked `rate_limited` and also produces a warning.
 
 The MCP tool returns a JSON text block plus native MCP `ImageContent` blocks.
 It base64-encodes each accepted thumbnail and supplies the detected MIME type.
@@ -78,3 +80,24 @@ errors without exposing the API key. Neither mode downloads originals.
 The smart-search HTTP request has a 60-second timeout because a model may need
 time to load or run; metadata search uses the client's 10-second timeout.
 Timeouts and other request failures have distinct user-facing errors.
+
+## Request failures and retries
+
+The client gives server info, metadata search, and thumbnail requests a
+10-second timeout; smart search has a 60-second timeout. It makes at most two
+attempts per read-only request. The second attempt is limited to short
+connection failures, 10-second read timeouts, and HTTP 429/502/503/504 when
+there is no long `Retry-After` delay. Smart-search read timeouts are not
+retried because the operation may already have run for 60 seconds. HTTP
+401/403, 500, other 4xx responses, malformed JSON, and invalid required
+response fields are not retried. HTTP 500 is marked retryable for a later
+agent decision, but there is no immediate retry.
+
+Tool errors have stable `code`, `message`, and `retryable` fields, with HTTP
+`status` and parsed `retry_after_seconds` where applicable. They omit the
+upstream body and internal request details. Invalid optional asset fields
+become `null`; missing IDs, invalid IDs or types, and invalid pagination
+fields produce `unexpected_response`. An empty valid `items` list returns
+`assets: []`. Thumbnail errors, invalid image bytes, oversized images, and
+redirects only affect that asset's thumbnail status; the metadata result
+remains available.

@@ -47,7 +47,7 @@ next page). Each item has `id`, `filename`, `type` (`image` or `video`), `taken_
 Video items also contain `duration_ms` (an integer or `null` when unavailable);
 image items omit it.
 Location, when available, contains city, state, country, latitude, and longitude.
-`thumbnail_status` is `included`, `unavailable`, `permission_denied`, or
+`thumbnail_status` is `included`, `unavailable`, `permission_denied`, `rate_limited`, or
 `not_requested`. When included, `thumbnail_content_index` identifies the
 corresponding image block in the MCP tool result's `content` array; the JSON
 text block is index 0. A host that supports MCP image content can display the
@@ -85,6 +85,23 @@ as `get_recent_assets`, including optional thumbnail image blocks.
 Smart search allows up to 60 seconds for the Immich machine-learning response;
 metadata search retains a 10-second timeout. A timeout now produces a specific
 tool error, so it can be distinguished from an HTTP error or connection failure.
+
+## Reliability and errors
+
+All Immich requests have explicit timeouts: 10 seconds for server info, metadata
+search, and each thumbnail; 60 seconds for smart search. Each read-only request
+may make one additional attempt for a short connection failure, a short read
+timeout (except smart search), HTTP 429, or HTTP 502/503/504. A `Retry-After`
+value above two seconds prevents an immediate retry. Authentication and
+permission failures, most other HTTP errors, invalid JSON, and unexpected
+response shapes are not retried. A failed thumbnail does not discard its asset
+metadata; its status reports `unavailable`, `permission_denied`, or
+`rate_limited` as appropriate.
+
+Tool failures provide a concise JSON error with `code`, `message`, and
+`retryable`; HTTP failures also include `status`, and a parsed retry delay is
+included when relevant. Upstream response bodies and API keys are never placed
+in these errors. An empty search is a successful result with `assets: []`.
 
 ## Verify with MCP Inspector
 

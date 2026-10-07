@@ -3,9 +3,12 @@
 import asyncio
 import base64
 import json
+import math
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Literal
+from uuid import UUID
 
 import httpx
 
@@ -14,6 +17,24 @@ from .config import Config
 
 class ImmichError(Exception):
     """A safe, user-facing Immich request error."""
+
+    def __init__(
+        self, message: str, *, code: str = "immich_error", status: int | None = None,
+        retryable: bool = False, retry_after_seconds: float | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.status = status
+        self.retryable = retryable
+        self.retry_after_seconds = retry_after_seconds
+
+    def to_dict(self) -> dict[str, object]:
+        result: dict[str, object] = {"code": self.code, "message": str(self), "retryable": self.retryable}
+        if self.status is not None:
+            result["status"] = self.status
+        if self.retry_after_seconds is not None:
+            result["retry_after_seconds"] = self.retry_after_seconds
+        return result
 
 
 @dataclass(frozen=True)
@@ -143,6 +164,22 @@ def _image_mime(data: bytes) -> str | None:
     return None
 
 
+def _retry_after_seconds(value: str | None) -> float | None:
+    if value is None:
+        return None
+    try:
+        seconds = float(value)
+    except ValueError:
+        try:
+            date = parsedate_to_datetime(value)
+            seconds = (date - datetime.now(timezone.utc)).total_seconds()
+        except (TypeError, ValueError, OverflowError):
+            return None
+    if not math.isfinite(seconds):
+        return None
+    return round(max(0, seconds), 3)
+
+
 class ImmichClient:
     def __init__(self, config: Config, *, transport: httpx.AsyncBaseTransport | None = None):
         self._http = httpx.AsyncClient(
@@ -159,20 +196,76 @@ class ImmichClient:
     async def __aexit__(self, *_exc: object) -> None:
         await self._http.aclose()
 
+    async def _request(
+        self, method: str, path: str, *, operation: str,
+        json_body: dict[str, object] | None = None,
+        params: dict[str, str] | None = None, timeout_seconds: float = 10.0,
+    ) -> httpx.Response:
+        # Every caller is a read-only request. One retry covers short transient failures.
+        for attempt in range(2):
+            try:
+                response = await self._http.request(
+                    method, path, json=json_body, params=params,
+                    timeout=httpx.Timeout(timeout_seconds),
+                )
+            except httpx.TimeoutException as exc:
+                can_retry = isinstance(exc, httpx.ConnectTimeout) or (
+                    timeout_seconds <= 10 and isinstance(exc, httpx.ReadTimeout)
+                )
+                if attempt == 0 and can_retry:
+                    await asyncio.sleep(0.2)
+                    continue
+                raise ImmichError(
+                    f"Immich {operation} timed out after {timeout_seconds:g} seconds",
+                    code="timeout", retryable=True,
+                ) from None
+            except (httpx.ConnectError, httpx.ReadError, httpx.RemoteProtocolError) as exc:
+                if attempt == 0:
+                    await asyncio.sleep(0.2)
+                    continue
+                raise ImmichError(
+                    f"Immich {operation} request failed ({type(exc).__name__})",
+                    code="connection_error", retryable=True,
+                ) from None
+            except httpx.RequestError as exc:
+                raise ImmichError(
+                    f"Immich {operation} request failed ({type(exc).__name__})",
+                    code="request_error",
+                ) from None
+
+            if response.status_code == 200:
+                return response
+            status = response.status_code
+            retry_after_header = response.headers.get("Retry-After")
+            retry_after = _retry_after_seconds(retry_after_header)
+            if status in (429, 502, 503, 504) and attempt == 0 and (
+                retry_after_header is None or (retry_after is not None and retry_after <= 2)
+            ):
+                await asyncio.sleep(retry_after if retry_after is not None else 0.2)
+                continue
+            code = (
+                "authentication_failed" if status == 401 else
+                "permission_denied" if status == 403 else
+                "rate_limited" if status == 429 else
+                "server_error" if 500 <= status <= 599 else "http_error"
+            )
+            raise ImmichError(
+                f"Immich {operation} returned HTTP {status}",
+                code=code, status=status,
+                retryable=status == 429 or 500 <= status <= 599,
+                retry_after_seconds=retry_after if status in (429, 503) else None,
+            )
+        raise AssertionError("unreachable")
+
     async def get_server_info(self) -> ServerInfo:
         try:
-            response = await self._http.get("server/about")
-            response.raise_for_status()
+            response = await self._request("GET", "server/about", operation="server info")
             data = response.json()
-        except httpx.HTTPStatusError as exc:
-            raise ImmichError(f"Immich returned HTTP {exc.response.status_code}") from None
-        except httpx.RequestError:
-            raise ImmichError("Could not connect to Immich") from None
         except ValueError:
-            raise ImmichError("Immich returned invalid JSON") from None
+            raise ImmichError("Immich server info returned invalid JSON", code="invalid_json") from None
 
         if not isinstance(data, dict) or not isinstance(data.get("version"), str):
-            raise ImmichError("Immich returned unexpected server information")
+            raise ImmichError("Immich returned unexpected server information", code="unexpected_response")
         build = data.get("build")
         return ServerInfo(version=data["version"], build=build if isinstance(build, str) else None)
 
@@ -282,36 +375,35 @@ class ImmichClient:
     ) -> tuple[list[Asset], str | None]:
         is_smart_search = endpoint == "search/smart"
         try:
-            if is_smart_search:
-                response = await self._http.post(endpoint, json=body, timeout=httpx.Timeout(60.0))
-            else:
-                response = await self._http.post(endpoint, json=body)
-            response.raise_for_status()
+            response = await self._request(
+                "POST", endpoint, operation="smart search" if is_smart_search else "metadata search",
+                json_body=body, timeout_seconds=60.0 if is_smart_search else 10.0,
+            )
             data = response.json()
-        except httpx.HTTPStatusError as exc:
-            raise ImmichError(f"Immich search returned HTTP {exc.response.status_code}") from None
-        except httpx.TimeoutException:
-            if is_smart_search:
-                raise ImmichError("Immich smart search timed out after 60 seconds") from None
-            raise ImmichError("Immich metadata search timed out after 10 seconds") from None
-        except httpx.RequestError as exc:
-            raise ImmichError(f"Immich search request failed ({type(exc).__name__})") from None
         except ValueError:
-            raise ImmichError("Immich search returned invalid JSON") from None
+            raise ImmichError("Immich search returned invalid JSON", code="invalid_json") from None
         assets = data.get("assets") if isinstance(data, dict) else None
         items = assets.get("items") if isinstance(assets, dict) else None
         if not isinstance(items, list) or (require_cursor and "nextCursor" not in assets):
-            raise ImmichError("Immich returned unexpected search results or does not support cursor pagination")
+            raise ImmichError("Immich returned unexpected search results or does not support cursor pagination",
+                              code="unexpected_response")
         next_cursor = assets.get("nextCursor")
-        if next_cursor is not None and not isinstance(next_cursor, str):
-            raise ImmichError("Immich returned an invalid search cursor")
+        if next_cursor is not None and (not isinstance(next_cursor, str) or not next_cursor):
+            raise ImmichError("Immich returned an invalid search cursor", code="unexpected_response")
         recent_assets: list[Asset] = []
         for item in items[:limit]:
             if not isinstance(item, dict) or not isinstance(item.get("id"), str) or not item["id"]:
-                continue
+                raise ImmichError("Immich returned an asset with invalid required fields",
+                                  code="unexpected_response")
+            try:
+                UUID(item["id"])
+            except ValueError:
+                raise ImmichError("Immich returned an asset with invalid required fields",
+                                  code="unexpected_response") from None
             raw_type = item.get("type")
             if raw_type not in ("IMAGE", "VIDEO"):
-                continue
+                raise ImmichError("Immich returned an asset with invalid required fields",
+                                  code="unexpected_response")
             asset_type: Literal["image", "video"] = "image" if raw_type == "IMAGE" else "video"
             duration = item.get("duration")
             duration_ms = duration if type(duration) is int and duration >= 0 else None
@@ -338,12 +430,17 @@ class ImmichClient:
 
     async def _get_thumbnail(self, asset_id: str) -> tuple[str, bytes | None, str | None]:
         try:
-            response = await self._http.get(f"assets/{asset_id}/thumbnail", params={"size": "thumbnail"})
-        except httpx.RequestError:
+            response = await self._request(
+                "GET", f"assets/{asset_id}/thumbnail", operation="thumbnail",
+                params={"size": "thumbnail"},
+            )
+        except ImmichError as exc:
+            if exc.code in ("authentication_failed", "permission_denied"):
+                return "permission_denied", None, None
+            if exc.code == "rate_limited":
+                return "rate_limited", None, None
             return "unavailable", None, None
-        if response.status_code in (401, 403):
-            return "permission_denied", None, None
-        if response.status_code != 200 or not response.content or len(response.content) > 1_000_000:
+        if not response.content or len(response.content) > 1_000_000:
             return "unavailable", None, None
         mime = _image_mime(response.content)
         if mime is None:

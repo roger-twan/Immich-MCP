@@ -16,11 +16,23 @@ from immich_mcp.config import Config
 mcp = MCPServer("Immich")
 
 
+def _tool_error(exc: ValueError | ImmichError) -> ToolError:
+    if isinstance(exc, ImmichError):
+        details = exc.to_dict()
+    else:
+        code = "configuration_error" if str(exc).startswith(("IMMICH_URL", "IMMICH_API_KEY")) else "invalid_input"
+        details = {"code": code, "message": str(exc), "retryable": False}
+    return ToolError(json.dumps(details, ensure_ascii=False))
+
+
 @mcp.tool()
 async def get_server_info() -> dict[str, str | None]:
     """Get the Immich server version and optional build identifier."""
-    async with ImmichClient(Config.from_dotenv()) as client:
-        info = await client.get_server_info()
+    try:
+        async with ImmichClient(Config.from_dotenv()) as client:
+            info = await client.get_server_info()
+    except (ValueError, ImmichError) as exc:
+        raise _tool_error(exc) from None
     return {"version": info.version, "build": info.build}
 
 
@@ -40,7 +52,7 @@ async def get_recent_assets(
                 start_at=start_at, end_before=end_before, page_token=page_token,
             )
     except (ValueError, ImmichError) as exc:
-        raise ToolError(str(exc)) from None
+        raise _tool_error(exc) from None
     return _asset_result(page)
 
 
@@ -65,7 +77,7 @@ async def search_assets(
                 page_token=page_token,
             )
     except (ValueError, ImmichError) as exc:
-        raise ToolError(str(exc)) from None
+        raise _tool_error(exc) from None
     return _asset_result(page)
 
 
@@ -97,6 +109,8 @@ def _asset_result(page: RecentAssetsPage) -> CallToolResult:
     result: dict[str, object] = {"assets": assets, "next_page_token": page.next_page_token}
     if any(asset.thumbnail_status == "permission_denied" for asset in page.assets):
         result["warnings"] = ["Thumbnails need the asset.view API key permission."]
+    if any(asset.thumbnail_status == "rate_limited" for asset in page.assets):
+        result.setdefault("warnings", []).append("Some thumbnails were rate limited by Immich.")
     return CallToolResult(
         content=[TextContent(type="text", text=json.dumps(result, ensure_ascii=False)), *images],
         structured_content=result,
